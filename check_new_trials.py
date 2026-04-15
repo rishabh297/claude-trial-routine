@@ -3,7 +3,7 @@
 Clinical Trials Daily Monitor
 
 Fetches newly posted clinical trials from ClinicalTrials.gov (API v2)
-and sends a summary email via SMTP.
+and sends a summary email via SendGrid.
 
 Usage:
     python check_new_trials.py              # checks yesterday's new trials
@@ -13,11 +13,8 @@ Usage:
 import os
 import sys
 import time
-import smtplib
 import logging
 from datetime import datetime, timedelta, timezone
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 import requests
 from dotenv import load_dotenv
@@ -32,10 +29,7 @@ PAGE_SIZE = 1000  # API maximum
 RATE_LIMIT_DELAY = 1.0  # seconds between paginated requests
 MAX_RETRIES = 4
 
-SMTP_HOST = os.environ.get("SMTP_HOST", "")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
 RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", "rishabh@bondtrials.com")
 
@@ -52,12 +46,12 @@ log = logging.getLogger(__name__)
 
 def validate_config():
     missing = []
-    for var in ("SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD", "SENDER_EMAIL"):
+    for var in ("SENDGRID_API_KEY", "SENDER_EMAIL"):
         if not os.environ.get(var):
             missing.append(var)
     if missing:
         log.error("Missing required environment variables: %s", ", ".join(missing))
-        log.error("Copy .env.example to .env and fill in your SMTP credentials.")
+        log.error("Copy .env.example to .env and fill in your SendGrid credentials.")
         sys.exit(1)
 
 
@@ -258,26 +252,40 @@ def _plain_email(trials: list[dict], date_str: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Email sending
+# Email sending via SendGrid
 # ---------------------------------------------------------------------------
 
+SENDGRID_API_URL = "https://api.sendgrid.com/v3/mail/send"
+
+
 def send_email(subject: str, html_body: str, plain_body: str):
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = SENDER_EMAIL
-    msg["To"] = RECIPIENT_EMAIL
+    payload = {
+        "personalizations": [
+            {"to": [{"email": RECIPIENT_EMAIL}]}
+        ],
+        "from": {"email": SENDER_EMAIL},
+        "subject": subject,
+        "content": [
+            {"type": "text/plain", "value": plain_body},
+            {"type": "text/html", "value": html_body},
+        ],
+    }
 
-    msg.attach(MIMEText(plain_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
+    resp = requests.post(
+        SENDGRID_API_URL,
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {SENDGRID_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        timeout=30,
+    )
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        server.sendmail(SENDER_EMAIL, [RECIPIENT_EMAIL], msg.as_string())
+    if resp.status_code not in (200, 201, 202):
+        log.error("SendGrid error %d: %s", resp.status_code, resp.text)
+        resp.raise_for_status()
 
-    log.info("Email sent to %s", RECIPIENT_EMAIL)
+    log.info("Email sent to %s via SendGrid", RECIPIENT_EMAIL)
 
 
 # ---------------------------------------------------------------------------
